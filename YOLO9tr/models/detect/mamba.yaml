@@ -26,19 +26,19 @@ backbone:
    [-1, 1, AConv, [128]],  # 3-P3/8
 
    # elan-2 block
-   [-1, 1, RepNCSPELAN4, [128, 128, 64, 3]],  # 4
+    [-1, 1, VisionMambaBlock, [128, True]], # 31 (P5/32-large)  # 8  # 4
 
    # avg-conv down
    [-1, 1, AConv, [192]],  # 5-P4/16
 
    # elan-2 block
-   [-1, 1, RepNCSPELAN4, [192, 192, 96, 3]],  # 6
+    [-1, 1, VisionMambaBlock, [192, True]], # 31 (P5/32-large)  # 6
 
    # avg-conv down
    [-1, 1, AConv, [256]],  # 7-P5/32
 
    # elan-2 block
-   [-1, 1, RepNCSPELAN4, [256, 256, 128, 3]],  # 8
+   [-1, 1, VisionMambaBlock, [256, True]], # 31 (P5/32-large)  # 8
   ]
 
 # elan head

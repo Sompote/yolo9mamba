@@ -961,7 +961,176 @@ class Mamba2(nn.Module):
             x = x + layer(x)  # Residual connection
         return x
 
+class VisionMambaBlock(nn.Module):
+    def __init__(self, d_model, d_state=16, d_conv=4, expand=2):
+        super().__init__()
+        self.d_model = d_model
+        self.d_state = d_state
+        self.d_conv = d_conv
+        self.expand = expand
+        self.d_inner = int(expand * d_model)
+        
+        # Input projection for both forward and backward paths
+        self.in_proj = nn.Linear(d_model, self.d_inner * 2)
+        
+        # Bidirectional convolutions
+        self.conv_forward = nn.Conv1d(
+            self.d_inner, 
+            self.d_inner, 
+            kernel_size=d_conv,
+            padding=d_conv - 1,
+            groups=self.d_inner
+        )
+        self.conv_backward = nn.Conv1d(
+            self.d_inner, 
+            self.d_inner, 
+            kernel_size=d_conv,
+            padding=d_conv - 1,
+            groups=self.d_inner
+        )
+        
+        # Activation function
+        self.activation = nn.SiLU()
+        
+        # Output projection
+        self.out_proj = nn.Linear(self.d_inner, d_model)
+        
+        # Layer norm for input
+        self.norm = nn.LayerNorm(d_model)
+        
+    def forward(self, x):
+        original_shape = x.shape
+        
+        # Handle different input shapes
+        if x.dim() == 2:
+            B, D = x.shape
+            L = 1
+            x = x.unsqueeze(1)  # Add sequence dimension
+        elif x.dim() == 3:
+            B, L, D = x.shape
+        elif x.dim() == 4:
+            B, C, H, W = x.shape
+            L = H * W
+            D = C
+            x = x.view(B, C, -1).permute(0, 2, 1)  # (B, L, D)
+        else:
+            raise ValueError(f"Input tensor must be 2D, 3D, or 4D, but got shape {x.shape}")
+        
+        # Apply layer norm
+        x = self.norm(x)
+        
+        # Split into forward and residual paths
+        x_and_res = self.in_proj(x)
+        x, res = x_and_res.chunk(2, dim=-1)
+        
+        # Forward path
+        x_f = x.permute(0, 2, 1)
+        x_f = self.conv_forward(x_f)[..., :L]
+        x_f = x_f.permute(0, 2, 1)
+        
+        # Backward path
+        x_b = torch.flip(x, [1])
+        x_b = x_b.permute(0, 2, 1)
+        x_b = self.conv_backward(x_b)[..., :L]
+        x_b = x_b.permute(0, 2, 1)
+        x_b = torch.flip(x_b, [1])
+        
+        # Combine paths and apply activation
+        x = x_f + x_b
+        x = self.activation(x)
+        
+        # Apply selective gating
+        x = x * res
+        
+        # Output projection
+        x = self.out_proj(x)
+        
+        # Reshape output to match input shape
+        if len(original_shape) == 4:
+            x = x.permute(0, 2, 1).view(original_shape)
+        elif len(original_shape) == 2:
+            x = x.squeeze(1)
+            
+        return x
 
+class VisionMamba(nn.Module):
+    def __init__(
+        self,
+        d_model,
+        depth=24,
+        d_state=16,
+        d_conv=4,
+        expand=2,
+        num_classes=1000,
+        patch_size=16,
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.patch_size = patch_size
+        
+        # Patch embedding
+        self.patch_embed = nn.Conv2d(3, d_model, patch_size, stride=patch_size)
+        
+        # Position embedding and class token
+        self.pos_embed = None  # Initialize later
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        
+        # Mamba blocks
+        self.blocks = nn.ModuleList([
+            VisionMambaBlock(
+                d_model=d_model,
+                d_state=d_state,
+                d_conv=d_conv,
+                expand=expand
+            ) for _ in range(depth)
+        ])
+        
+        # Classification head
+        self.norm = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, num_classes)
+        
+        # Initialize weights
+        self.apply(self._init_weights)
+        
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            torch.nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+            
+    def forward(self, x):
+        # Detect image size
+        B, C, H, W = x.shape  # Get batch size, channels, height, width
+        num_patches = (H // self.patch_size) * (W // self.patch_size)  # Calculate number of patches
+        
+        # Update position embedding based on detected image size
+        if self.pos_embed is None:
+            self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, self.d_model))
+        
+        # Patch embedding
+        x = self.patch_embed(x)
+        
+        # Reshape and add position embedding
+        x = rearrange(x, 'b c h w -> b (h w) c')
+        
+        # Add class token
+        cls_token = self.cls_token.expand(B, -1, -1)
+        x = torch.cat([cls_token, x], dim=1)
+        x = x + self.pos_embed
+        
+        # Apply Mamba blocks
+        for block in self.blocks:
+            x = block(x)
+            
+        # Classification
+        x = self.norm(x)
+        x = x[:, 0]  # Use class token
+        x = self.head(x)
+        
+        return x
 
 ##### YOLOR #####
 
